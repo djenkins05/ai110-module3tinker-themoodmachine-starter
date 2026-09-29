@@ -114,8 +114,23 @@ class MoodAnalyzer:
         harder to read and reason about than this one-word window.
         """
         tokens = self.preprocess(text)
+        score, _, _ = self._analyze_tokens(tokens)
+        return score
+
+    def _analyze_tokens(self, tokens: List[str]) -> Tuple[int, bool, bool]:
+        """
+        Shared scoring loop used by score_text() and predict_label().
+
+        Returns the net score plus two flags: whether any token pushed the
+        score up, and whether any token pushed it down. predict_label()
+        needs those flags to tell a genuinely neutral post ("This is fine",
+        no signal either way) apart from a "mixed" one where positive and
+        negative signals both fired and happened to cancel out.
+        """
         score = 0
         negated = False
+        saw_positive_push = False
+        saw_negative_push = False
 
         for token in tokens:
             if token in NEGATION_WORDS:
@@ -123,13 +138,21 @@ class MoodAnalyzer:
                 continue
 
             if token in self.positive_words:
-                score += -1 if negated else 1
+                contribution = -1 if negated else 1
             elif token in self.negative_words:
-                score += 1 if negated else -1
+                contribution = 1 if negated else -1
+            else:
+                negated = False
+                continue
 
+            score += contribution
+            if contribution > 0:
+                saw_positive_push = True
+            else:
+                saw_negative_push = True
             negated = False
 
-        return score
+        return score, saw_positive_push, saw_negative_push
 
     # ---------------------------------------------------------------------
     # Label prediction
@@ -139,24 +162,30 @@ class MoodAnalyzer:
         """
         Turn the numeric score for a piece of text into a mood label.
 
-        The default mapping is:
+        Mapping:
+          - both positive and negative signals fired -> "mixed"
+            (e.g. "tired but happy": +1 and -1 cancel to a score of 0,
+            which would otherwise look identical to "This is fine")
           - score > 0  -> "positive"
           - score < 0  -> "negative"
-          - score == 0 -> "neutral"
+          - otherwise  -> "neutral" (no signal either way)
 
-        TODO: You can adjust this mapping if it makes sense for your model.
-        For example:
-          - Use different thresholds (for example score >= 2 to be "positive")
-          - Add a "mixed" label for scores close to zero
-        Just remember that whatever labels you return should match the labels
-        you use in TRUE_LABELS in dataset.py if you care about accuracy.
+        No magnitude threshold (like requiring score >= 2) is used: on
+        short, one-sentence posts this word list rarely matches more than
+        one word per side, so scores are almost always -1, 0, or 1. A
+        stricter threshold would just relabel every non-zero case as
+        "neutral" and erase the model's signal entirely.
         """
-        # TODO: Implement this method.
-        #   1. Call self.score_text(text) to get the numeric score.
-        #   2. Return "positive" if the score is above 0.
-        #   3. Return "negative" if the score is below 0.
-        #   4. Return "neutral" otherwise.
-        pass
+        tokens = self.preprocess(text)
+        score, saw_positive, saw_negative = self._analyze_tokens(tokens)
+
+        if saw_positive and saw_negative:
+            return "mixed"
+        if score > 0:
+            return "positive"
+        if score < 0:
+            return "negative"
+        return "neutral"
 
     # ---------------------------------------------------------------------
     # Explanations (optional but recommended)
