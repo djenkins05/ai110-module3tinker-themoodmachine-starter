@@ -9,9 +9,31 @@ This class starts with very simple logic:
   - Convert that score into a mood label
 """
 
+import re
+import string
 from typing import List, Dict, Tuple, Optional
 
 from dataset import POSITIVE_WORDS, NEGATIVE_WORDS
+
+# Common text emoticons, longest first so e.g. ":-)" matches before ":)"
+# would even get a chance to grab just part of it.
+_EMOTICONS = sorted(
+    [":)", ":-)", ":(", ":-(", ":'(", ":')", ";)", ";-)", ":d", ":-d", ":p", ":-p", ":/", ":-/"],
+    key=len,
+    reverse=True,
+)
+EMOTICON_PATTERN = re.compile("|".join(re.escape(e) for e in _EMOTICONS))
+
+# Broad ranges covering most common unicode emoji (🥲, 😂, 💀, etc.).
+UNICODE_EMOJI_PATTERN = re.compile("[\U0001F300-\U0001FAFF☀-➿]")
+
+# Words that flip the sentiment of the token right after them
+# ("not happy" -> negative). Written without apostrophes because
+# preprocess() strips punctuation before these are checked.
+NEGATION_WORDS = {
+    "not", "no", "never", "cant", "dont", "wont", "isnt",
+    "wasnt", "arent", "couldnt", "shouldnt", "wouldnt", "cannot",
+}
 
 
 class MoodAnalyzer:
@@ -53,7 +75,23 @@ class MoodAnalyzer:
           - Normalize repeated characters ("soooo" -> "soo")
         """
         cleaned = text.strip().lower()
-        tokens = cleaned.split()
+
+        # Pull emoticons out first (e.g. ":)" or ":-(") so stripping
+        # punctuation below doesn't destroy them, and space-pad unicode
+        # emoji (e.g. "🥲") so they split into their own tokens even when
+        # glued to a word, like "great😂".
+        emoticons = EMOTICON_PATTERN.findall(cleaned)
+        cleaned = EMOTICON_PATTERN.sub(" ", cleaned)
+        cleaned = UNICODE_EMOJI_PATTERN.sub(r" \g<0> ", cleaned)
+
+        # Now it's safe to strip the remaining punctuation.
+        cleaned = cleaned.translate(str.maketrans("", "", string.punctuation))
+
+        tokens = cleaned.split() + emoticons
+
+        # Normalize repeated characters ("soooo" -> "soo") so minor
+        # spelling variations still match the word lists.
+        tokens = [re.sub(r"(.)\1{2,}", r"\1\1", token) for token in tokens]
 
         return tokens
 
@@ -65,25 +103,33 @@ class MoodAnalyzer:
         """
         Compute a numeric "mood score" for the given text.
 
-        Positive words increase the score.
-        Negative words decrease the score.
+        Positive words add 1, negative words subtract 1. A word immediately
+        after a negation word (NEGATION_WORDS, e.g. "not", "never") has its
+        sign flipped instead, so "not happy" subtracts and "not bad" adds.
 
-        TODO: You must choose AT LEAST ONE modeling improvement to implement.
-        For example:
-          - Handle simple negation such as "not happy" or "not bad"
-          - Count how many times each word appears instead of just presence
-          - Give some words higher weights than others (for example "hate" < "annoyed")
-          - Treat emojis or slang (":)", "lol", "💀") as strong signals
+        Negation only looks one token ahead, so "not very happy" misses the
+        flip ("very" isn't a sentiment word, so it resets the negation
+        before "happy" is checked). Catching that would mean carrying the
+        negation across non-sentiment words, which is more correct but
+        harder to read and reason about than this one-word window.
         """
-        # TODO: Implement this method.
-        #   1. Call self.preprocess(text) to get tokens.
-        #   2. Loop over the tokens.
-        #   3. Increase the score for positive words, decrease for negative words.
-        #   4. Return the total score.
-        #
-        # Hint: if you implement negation, you may want to look at pairs of tokens,
-        # like ("not", "happy") or ("never", "fun").
-        pass
+        tokens = self.preprocess(text)
+        score = 0
+        negated = False
+
+        for token in tokens:
+            if token in NEGATION_WORDS:
+                negated = True
+                continue
+
+            if token in self.positive_words:
+                score += -1 if negated else 1
+            elif token in self.negative_words:
+                score += 1 if negated else -1
+
+            negated = False
+
+        return score
 
     # ---------------------------------------------------------------------
     # Label prediction
